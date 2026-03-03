@@ -2,15 +2,15 @@ import os
 import time
 import feedparser
 import requests
-import json
 import hashlib
+import logging
+import concurrent.futures
 from datetime import datetime, timedelta
 from openai import OpenAI
 
 # ================= 配置区域 =================
 # 1. DeepSeek API 配置
-# 优先从环境变量获取，如果没有则使用默认值（本地测试用）
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-b5a199c465db4b30a2bfd0cff73f4589")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # 2. 关键词过滤 (只保留包含这些词的新闻)
@@ -38,7 +38,7 @@ RSS_FEEDS = [
     "https://www.infoq.cn/feed",            # InfoQ (技术深度)
     "https://www.oschina.net/news/rss",     # 开源中国 (国内开源动态)
     "https://rss.huxiu.com/",               # 虎嗅网 (深度商业科技)
-    "https://www.qbitai.com/feed",          # 量子位 (AI 垂直媒体，如果 RSS 不可用会自动跳过)
+    "https://www.qbitai.com/feed",          # 量子位 (AI 垂直媒体)
     
     # --- 国外源 (GitHub Actions 可直接访问) ---
     "https://openai.com/blog/rss.xml",      # OpenAI 官方博客
@@ -49,46 +49,18 @@ RSS_FEEDS = [
     "https://huggingface.co/blog/feed.xml",   # Hugging Face Blog (开源模型)
 ]
 
-# 4. 去重记录文件 (GitHub Actions 环境下每次都是新的，主要依赖时间过滤)
-HISTORY_FILE = "sent_history.json"
-
-# 5. 日志文件
-LOG_FILE = "news_bot.log"
-
-# 6. Server 酱配置 (微信推送)
-# 优先从环境变量获取
-SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "SCT318073TLLDJl7BzhZ6r1ry5m6sYNvxM")
+# 4. Server 酱配置 (微信推送)
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY")
 
 # ===========================================
 
-def log_message(message):
-    """记录日志到文件和控制台"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] {message}"
-    print(log_line)
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(log_line + "\n")
-    except Exception as e:
-        print(f"写入日志失败: {e}")
-
-def load_sent_history():
-    """加载已发送新闻的历史记录"""
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception as e:
-            log_message(f"加载历史记录失败: {e}")
-    return set()
-
-def save_sent_history(sent_links):
-    """保存已发送新闻的历史记录"""
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(sent_links), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log_message(f"保存历史记录失败: {e}")
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 def get_article_id(link):
     """生成文章唯一ID（基于链接的MD5哈希）"""
@@ -105,31 +77,30 @@ def parse_published_time(entry):
         pass
     return None
 
-def fetch_news():
-    """抓取并筛选新闻"""
-    log_message("开始抓取新闻...")
-    articles = []
-    sent_history = load_sent_history()
-    now = datetime.now()
-    cutoff_time = now - timedelta(hours=24)  # 24小时内的新闻
-    
-    for feed_url in RSS_FEEDS:
+def fetch_single_feed(feed_url, cutoff_time):
+    """抓取单个 RSS 源 (带重试机制)"""
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            feed = feedparser.parse(feed_url)
-            feed_title = feed.feed.get("title", feed_url)
-            log_message(f"正在抓取: {feed_title}")
+            # 设置 User-Agent 防止被拦截
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
             
+            # 使用 requests 获取内容，设置超时
+            response = requests.get(feed_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            # 解析内容
+            feed = feedparser.parse(response.content)
+            feed_title = feed.feed.get("title", feed_url)
+            logger.info(f"正在抓取: {feed_title}")
+            
+            articles = []
             for entry in feed.entries:
                 title = entry.title
                 link = entry.link
                 summary = entry.get("summary", "") + entry.get("description", "")
-                
-                # 生成文章唯一ID
-                article_id = get_article_id(link)
-                
-                # 检查是否已发送过
-                if article_id in sent_history:
-                    continue
                 
                 # 检查发布时间（只看最近24小时的）
                 pub_time = parse_published_time(entry)
@@ -140,24 +111,57 @@ def fetch_news():
                 content_to_check = f"{title} {summary}"
                 if any(k.lower() in content_to_check.lower() for k in KEYWORDS):
                     articles.append({
-                        "id": article_id,
+                        "id": get_article_id(link),
                         "title": title,
                         "link": link,
                         "summary": summary[:200] + "..." if len(summary) > 200 else summary,
                         "published": pub_time.strftime("%Y-%m-%d %H:%M") if pub_time else "未知"
                     })
+            return articles
+            
         except Exception as e:
-            log_message(f"抓取 {feed_url} 失败: {e}")
+            if attempt < max_retries - 1:
+                logger.warning(f"抓取 {feed_url} 失败 (第 {attempt+1} 次重试): {e}")
+                time.sleep(2)
+            else:
+                logger.error(f"抓取 {feed_url} 最终失败: {e}")
+                return []
+    return []
+
+def fetch_news():
+    """多线程并发抓取并筛选新闻"""
+    logger.info("开始多线程抓取新闻...")
+    all_articles = []
+    seen_ids = set() # 本次运行去重
     
-    log_message(f"抓取完成，筛选出 {len(articles)} 条新相关新闻。")
-    return articles
+    now = datetime.now()
+    cutoff_time = now - timedelta(hours=24)  # 24小时内的新闻
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RSS_FEEDS)) as executor:
+        # 提交所有任务
+        future_to_url = {executor.submit(fetch_single_feed, url, cutoff_time): url for url in RSS_FEEDS}
+        
+        for future in concurrent.futures.as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                articles = future.result()
+                if articles:
+                    for article in articles:
+                        if article["id"] not in seen_ids:
+                            seen_ids.add(article["id"])
+                            all_articles.append(article)
+            except Exception as e:
+                logger.error(f"处理 {url} 结果时出错: {e}")
+    
+    logger.info(f"抓取完成，共筛选出 {len(all_articles)} 条新相关新闻。")
+    return all_articles
 
 def summarize_with_deepseek(articles):
     """使用 DeepSeek 总结新闻"""
     if not articles:
         return None
 
-    log_message("正在调用 DeepSeek 进行总结...")
+    logger.info("正在调用 DeepSeek 进行总结...")
     
     # 构造提示词
     news_text = "\n\n".join([
@@ -207,11 +211,11 @@ def summarize_with_deepseek(articles):
                 {"role": "user", "content": prompt},
             ],
             stream=False,
-            timeout=60  # 添加超时设置
+            timeout=60
         )
         return response.choices[0].message.content
     except Exception as e:
-        log_message(f"DeepSeek 调用失败: {e}")
+        logger.error(f"DeepSeek 调用失败: {e}")
         return None
 
 def split_content(content, limit=3500):
@@ -225,23 +229,23 @@ def split_content(content, limit=3500):
     parts = []
     current_part = ""
     
-    # 按新闻条目拆分（假设每条新闻以 **序号. 开头）
-    # 使用正则找到每条新闻的起始位置
-    import re
-    # 匹配 **1. 、**2. 这种格式，或者 ### 标题
-    news_items = re.split(r'(?=\*\*\d+\.|### )', content)
+    # 尝试按分割线 `---` 拆分，这比按序号拆分更稳健
+    news_items = content.split('---')
     
     for item in news_items:
         if not item.strip():
             continue
+        
+        # 补回分割线（除了最后一个片段，显示时美观）
+        item_with_separator = item + "\n---\n"
             
         # 如果当前部分加上新的一条新闻超过限制，就先保存当前部分
-        if len(current_part) + len(item) > limit:
+        if len(current_part) + len(item_with_separator) > limit:
             if current_part:
                 parts.append(current_part)
-            current_part = item
+            current_part = item_with_separator
         else:
-            current_part += item
+            current_part += item_with_separator
             
     if current_part:
         parts.append(current_part)
@@ -253,11 +257,11 @@ def send_wechat(content, articles=None):
     if not content:
         return False
     
-    if not SERVERCHAN_SENDKEY or "SCT" not in SERVERCHAN_SENDKEY:
-        log_message("Server 酱 SendKey 未配置，跳过微信推送")
+    if not SERVERCHAN_SENDKEY:
+        logger.warning("Server 酱 SendKey 未配置，跳过微信推送")
         return False
     
-    log_message("正在发送微信消息...")
+    logger.info("正在发送微信消息...")
     
     # 自动拆分消息
     content_parts = split_content(content)
@@ -279,79 +283,73 @@ def send_wechat(content, articles=None):
             desp = part
             # 只在最后一条加上统计信息
             if i == total_parts - 1:
-                desp += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                desp += f"\n\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             
-            # 发送请求
-            data = {
-                "title": title,
-                "desp": desp
-            }
-            
-            response = requests.post(url, data=data, timeout=30)
-            result = response.json()
-            
-            if result.get("code") == 0:
-                log_message(f"第 {i+1}/{total_parts} 条消息发送成功！")
-                success_count += 1
-            else:
-                log_message(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
+            # 发送请求，增加重试
+            for attempt in range(3):
+                try:
+                    response = requests.post(url, data={"title": title, "desp": desp}, timeout=30)
+                    result = response.json()
+                    
+                    if result.get("code") == 0:
+                        logger.info(f"第 {i+1}/{total_parts} 条消息发送成功！")
+                        success_count += 1
+                        break
+                    else:
+                        logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(2)
+                    else:
+                        logger.error(f"发送失败: {e}")
                 
             # 避免发送太快被限制
             if total_parts > 1:
                 time.sleep(2)
                 
         except Exception as e:
-            log_message(f"发送失败: {e}")
+            logger.error(f"发送流程异常: {e}")
     
     return success_count > 0
 
 def job():
     """定时任务执行的主逻辑"""
-    log_message("=" * 50)
-    log_message("任务开始执行...")
+    logger.info("=" * 50)
+    logger.info("任务开始执行...")
     
     articles = fetch_news()
     if articles:
         summary = summarize_with_deepseek(articles)
         if summary:
             # 只发送微信
-            wechat_success = send_wechat(summary, articles)
-            
-            if wechat_success:
-                sent_history = load_sent_history()
-                for article in articles:
-                    sent_history.add(article["id"])
-                save_sent_history(sent_history)
-                log_message(f"已记录 {len(articles)} 条新闻到历史记录")
-            else:
-                log_message("微信发送失败，未记录历史")
+            send_wechat(summary, articles)
         else:
-            log_message("摘要生成失败或为空，跳过发送。")
+            logger.warning("摘要生成失败或为空，跳过发送。")
     else:
-        log_message("今天没有监测到相关重点新闻。")
+        logger.info("今天没有监测到相关重点新闻。")
     
-    log_message("任务执行完成")
-    log_message("=" * 50)
+    logger.info("任务执行完成")
+    logger.info("=" * 50)
 
 def main():
     """主程序入口"""
-    log_message("=== AI 新闻助手启动 (GitHub Actions 模式) ===")
+    logger.info("=== AI 新闻助手启动 (GitHub Actions 模式) ===")
     
     # 检查环境变量配置
-    if not DEEPSEEK_API_KEY or "sk-" not in DEEPSEEK_API_KEY:
-        log_message("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
+    if not DEEPSEEK_API_KEY:
+        logger.error("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
         return
 
-    if not SERVERCHAN_SENDKEY or "SCT" not in SERVERCHAN_SENDKEY:
-        log_message("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
+    if not SERVERCHAN_SENDKEY:
+        logger.warning("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
 
     # 执行一次任务
     try:
         job()
     except Exception as e:
-        log_message(f"任务执行出错: {e}")
+        logger.error(f"任务执行出错: {e}")
     
-    log_message("=== 任务结束 ===")
+    logger.info("=== 任务结束 ===")
 
 if __name__ == "__main__":
     main()
