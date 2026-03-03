@@ -18,12 +18,22 @@ KEYWORDS = [
     "大模型", "LLM", "GPT-4", "GPT-5", "OpenAI", "Anthropic", "Google DeepMind"
 ]
 
-# 3. 新闻源 (精选国内访问速度快且权威的源)
+# 3. 新闻源 (精选国内外 AI 优质源)
 RSS_FEEDS = [
+    # --- 国内源 ---
     "https://36kr.com/feed",                # 36氪 (科技综合)
     "https://www.infoq.cn/feed",            # InfoQ (技术深度)
     "https://www.oschina.net/news/rss",     # 开源中国 (国内开源动态)
-    # 如果需要更多源，可以在这里添加
+    "https://rss.huxiu.com/",               # 虎嗅网 (深度商业科技)
+    "https://www.qbitai.com/feed",          # 量子位 (AI 垂直媒体，如果 RSS 不可用会自动跳过)
+    
+    # --- 国外源 (GitHub Actions 可直接访问) ---
+    "https://openai.com/blog/rss.xml",      # OpenAI 官方博客
+    "https://www.anthropic.com/feed",       # Anthropic (Claude) 官方博客
+    "https://googleblog.blogspot.com/feeds/posts/default", # Google AI Blog
+    "https://techcrunch.com/category/artificial-intelligence/feed/", # TechCrunch AI
+    "https://www.theverge.com/rss/index.xml", # The Verge (前沿科技)
+    "https://huggingface.co/blog/feed.xml",   # Hugging Face Blog (开源模型)
 ]
 
 # 4. 去重记录文件 (GitHub Actions 环境下每次都是新的，主要依赖时间过滤)
@@ -142,14 +152,24 @@ def summarize_with_deepseek(articles):
         for i, a in enumerate(articles)
     ])
     
-    prompt = f"""以下是最新的AI大模型新闻，请直接列出要点，不要加开场白和客套话。
+    prompt = f"""以下是过去 24 小时内全球最新的 AI 新闻。请你扮演一位资深 AI 科技编辑，为我生成一份高质量的早报。
 
 要求：
-1. 直接分点列出最重要的 3-5 条新闻
-2. 每条新闻用一句话概括核心内容
-3. 每条新闻后面必须附上原文链接（格式：[查看原文](链接)）
-4. 最后加一句简短的"热评"（用**粗体**标注）
-5. 不要出现"根据您提供的新闻"、"以下是"等废话
+1. **筛选数量**：请从下方列表中筛选出 **10-20 条** 最有价值、最重磅的新闻（如果新闻不够则有多少列多少）。
+2. **内容深度**：每条新闻不要只写一句话！请用一段话（约 50-80 字）进行**深度摘要**。
+   - 包含：核心事件（What）、技术突破点或关键数据（How）、对行业的影响（Impact）。
+   - 如果是国外新闻，必须翻译成流畅的中文。
+3. **格式要求**：
+   - 标题加粗，前面加序号。
+   - 摘要换行显示。
+   - 最后附上原文链接。
+   - 格式示例：
+     **1. OpenAI 发布 GPT-5 预览版**
+     摘要：OpenAI 今日突发宣布 GPT-5 预览版，性能在数学和编程基准测试上超越 GPT-4 30% 以上。新模型引入了“慢思考”机制，极大提升了复杂推理能力。这对 Agent 领域将产生深远影响。
+     [查看原文](链接)
+
+4. **分类**：请将新闻按类别分组（如：🚀 模型动态、🏢 大厂动向、🔧 开源社区、💡 行业应用）。
+5. **热评**：在早报最后，请用一段简短犀利的话（"编辑辣评"），点评今天的整体 AI 趋势。
 
 新闻列表：
 {news_text}
