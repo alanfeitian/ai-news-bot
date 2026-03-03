@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.log
+sent_history.json
+.vscode/
