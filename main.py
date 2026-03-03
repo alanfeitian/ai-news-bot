@@ -42,9 +42,10 @@ HISTORY_FILE = "sent_history.json"
 # 5. 日志文件
 LOG_FILE = "news_bot.log"
 
-# 6. Server 酱配置 (微信推送)
+# 6. WxPusher 配置 (微信推送)
 # 优先从环境变量获取
-SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "SCT318073TLLDJl7BzhZ6r1ry5m6sYNvxM")
+WXPUSHER_APP_TOKEN = os.environ.get("WXPUSHER_APP_TOKEN", "AT_vmsdS2IjRoSdpl8IOdRG58DgHI5SmVwS")
+WXPUSHER_UID = os.environ.get("WXPUSHER_UID", "UID_Sdw9ZKcVuNDsxwLcwiGfAQTgDTaA")
 
 # ===========================================
 
@@ -245,46 +246,64 @@ def markdown_to_html(text):
     return text
 
 def send_wechat(content, articles=None):
-    """使用 Server 酱发送微信消息"""
+    """使用 WxPusher 发送微信消息 (HTML 格式)"""
     if not content:
         return False
     
-    if SERVERCHAN_SENDKEY == "YOUR_SENDKEY_HERE":
-        log_message("Server 酱 SendKey 未配置，跳过微信推送")
+    if not WXPUSHER_APP_TOKEN or not WXPUSHER_UID:
+        log_message("WxPusher 配置缺失，跳过推送")
         return False
     
-    log_message("正在发送微信消息...")
+    log_message("正在通过 WxPusher 发送微信消息...")
     
+    # 转换 Markdown 为 HTML，增加一些美化样式
+    html_content = markdown_to_html(content)
+    
+    # 简单的 CSS 美化
+    style = """
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; }
+        h1 { font-size: 22px; color: #2c3e50; border-bottom: 2px solid #eaecef; padding-bottom: 10px; margin-top: 20px; }
+        h2 { font-size: 18px; color: #47525d; margin-top: 20px; }
+        h3 { font-size: 16px; font-weight: bold; color: #0366d6; margin-top: 15px; }
+        p { margin-bottom: 10px; }
+        strong { color: #d32f2f; }
+        a { color: #0366d6; text-decoration: none; }
+        ul { padding-left: 20px; }
+        li { margin-bottom: 5px; }
+        .footer { font-size: 12px; color: #999; margin-top: 30px; border-top: 1px solid #eee; padding-top: 10px; }
+    </style>
+    """
+    
+    full_html = f"""
+    <html>
+    <head>{style}</head>
+    <body>
+        {html_content}
+        <div class="footer">
+            <p>📊 共 {len(articles) if articles else 0} 条新闻 | ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        </div>
+    </body>
+    </html>
+    """
+
     try:
-        # Server 酱 API 地址
-        url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-        
-        # 构造消息内容
-        title = f"🤖 AI 早报 ({datetime.now().strftime('%Y-%m-%d')})"
-        
-        # 内容需要处理一下，Server 酱支持 Markdown
-        # 去掉过长的内容，避免超出限制
-        desp = content
-        if len(desp) > 4000:
-            desp = desp[:4000] + "\n\n...(内容过长，已截断)"
-        
-        # 添加统计信息
-        desp += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        # 发送请求
+        url = "https://wxpusher.zjiecode.com/api/send/message"
         data = {
-            "title": title,
-            "desp": desp
+            "appToken": WXPUSHER_APP_TOKEN,
+            "content": full_html,
+            "contentType": 2,  # 2 表示 HTML
+            "uids": [WXPUSHER_UID]
         }
         
-        response = requests.post(url, data=data, timeout=30)
+        response = requests.post(url, json=data, timeout=30)
         result = response.json()
         
-        if result.get("code") == 0:
+        if result.get("success"):
             log_message("微信消息发送成功！")
             return True
         else:
-            log_message(f"微信消息发送失败: {result.get('message', '未知错误')}")
+            log_message(f"微信消息发送失败: {result.get('msg')}")
             return False
             
     except Exception as e:
@@ -328,8 +347,8 @@ def main():
         log_message("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
         return
 
-    if not SERVERCHAN_SENDKEY or "SCT" not in SERVERCHAN_SENDKEY:
-        log_message("警告: 未检测到有效的 SERVERCHAN_SENDKEY，微信推送可能失败。")
+    if not WXPUSHER_APP_TOKEN or not WXPUSHER_UID:
+        log_message("警告: 未检测到有效的 WxPusher 配置，微信推送可能失败。")
 
     # 执行一次任务
     try:
