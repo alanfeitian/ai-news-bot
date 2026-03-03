@@ -27,6 +27,7 @@ jobs:
     - name: Run script
       env:
         DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        WXPUSHER_APP_TOKEN: ${{ secrets.WXPUSHER_APP_TOKEN }}
-        WXPUSHER_UID: ${{ secrets.WXPUSHER_UID }}
+        WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
+        WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
+        WECOM_SECRET: ${{ secrets.WECOM_SECRET }}
       run: python main.py
