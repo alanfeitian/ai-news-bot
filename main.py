@@ -1,4 +1,5 @@
 import os
+import time
 import feedparser
 import requests
 import json
@@ -42,11 +43,9 @@ HISTORY_FILE = "sent_history.json"
 # 5. 日志文件
 LOG_FILE = "news_bot.log"
 
-# 6. 企业微信配置 (无需中间商，直接推送)
+# 6. Server 酱配置 (微信推送)
 # 优先从环境变量获取
-WECOM_CORPID = os.environ.get("WECOM_CORPID", "wwb2884e1d187304f9")
-WECOM_AGENTID = os.environ.get("WECOM_AGENTID", "1000002")
-WECOM_SECRET = os.environ.get("WECOM_SECRET", "9-sMNYdJ6XKwoEQyZ9PRyaC3ifB1DRXv50qEGLHTpLs")
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "SCT318073TLLDJl7BzhZ6r1ry5m6sYNvxM")
 
 # ===========================================
 
@@ -193,144 +192,96 @@ def summarize_with_deepseek(articles):
         log_message(f"DeepSeek 调用失败: {e}")
         return None
 
-def markdown_to_html(text):
-    """将 Markdown 格式转换为 HTML"""
+def split_content(content, limit=3500):
+    """
+    智能拆分长消息，确保不截断单条新闻
+    limit: Server酱限制约 4000 字符，预留 500 字符给标题和统计信息
+    """
+    if len(content) <= limit:
+        return [content]
+    
+    parts = []
+    current_part = ""
+    
+    # 按新闻条目拆分（假设每条新闻以 **序号. 开头）
+    # 使用正则找到每条新闻的起始位置
     import re
+    # 匹配 **1. 、**2. 这种格式，或者 ### 标题
+    news_items = re.split(r'(?=\*\*\d+\.|### )', content)
     
-    # 保存代码块
-    code_blocks = []
-    def save_code_block(match):
-        code_blocks.append(match.group(1))
-        return f"{{CODE_BLOCK_{len(code_blocks)-1}}}"
-    
-    text = re.sub(r'```(.*?)```', save_code_block, text, flags=re.DOTALL)
-    text = re.sub(r'`([^`]+)`', save_code_block, text)
-    
-    # 转换标题 ### 
-    text = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
-    text = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
-    text = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
-    
-    # 转换粗体 **text**
-    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
-    
-    # 转换斜体 *text*
-    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
-    
-    # 转换链接 [text](url)
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
-    
-    # 转换无序列表
-    lines = text.split('\n')
-    result = []
-    in_list = False
-    for line in lines:
-        if re.match(r'^\s*[-*]\s+', line):
-            if not in_list:
-                result.append('<ul>')
-                in_list = True
-            content = re.sub(r'^\s*[-*]\s+', '', line)
-            result.append(f'<li>{content}</li>')
+    for item in news_items:
+        if not item.strip():
+            continue
+            
+        # 如果当前部分加上新的一条新闻超过限制，就先保存当前部分
+        if len(current_part) + len(item) > limit:
+            if current_part:
+                parts.append(current_part)
+            current_part = item
         else:
-            if in_list:
-                result.append('</ul>')
-                in_list = False
-            result.append(line)
-    if in_list:
-        result.append('</ul>')
-    text = '\n'.join(result)
-    
-    # 恢复代码块
-    for i, code in enumerate(code_blocks):
-        text = text.replace(f"{{CODE_BLOCK_{i}}}", f"<code>{code}</code>")
-    
-    return text
+            current_part += item
+            
+    if current_part:
+        parts.append(current_part)
+        
+    return parts
 
 def send_wechat(content, articles=None):
-    """使用企业微信直接推送 (HTML 格式)"""
+    """使用 Server 酱发送微信消息 (自动拆分长消息)"""
     if not content:
         return False
     
-    if not WECOM_CORPID or not WECOM_SECRET or not WECOM_AGENTID:
-        log_message("企业微信配置缺失，跳过推送")
+    if not SERVERCHAN_SENDKEY or "SCT" not in SERVERCHAN_SENDKEY:
+        log_message("Server 酱 SendKey 未配置，跳过微信推送")
         return False
     
-    log_message("正在通过企业微信发送消息...")
+    log_message("正在发送微信消息...")
     
-    # 转换 Markdown 为 HTML
-    html_content = markdown_to_html(content)
+    # 自动拆分消息
+    content_parts = split_content(content)
+    total_parts = len(content_parts)
     
-    # 简单的 CSS 美化
-    style = """
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; }
-        h1 { font-size: 20px; color: #2c3e50; border-bottom: 2px solid #eaecef; padding-bottom: 10px; margin-top: 20px; }
-        h2 { font-size: 18px; color: #47525d; margin-top: 20px; }
-        h3 { font-size: 16px; font-weight: bold; color: #0366d6; margin-top: 15px; }
-        p { margin-bottom: 10px; }
-        strong { color: #d32f2f; }
-        a { color: #0366d6; text-decoration: none; }
-        ul { padding-left: 20px; }
-        li { margin-bottom: 5px; }
-        .footer { font-size: 12px; color: #999; margin-top: 30px; border-top: 1px solid #eee; padding-top: 10px; }
-    </style>
-    """
+    success_count = 0
     
-    full_html = f"""
-    <html>
-    <head>{style}</head>
-    <body>
-        {html_content}
-        <div class="footer">
-            <p>📊 共 {len(articles) if articles else 0} 条新闻 | ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
-        </div>
-    </body>
-    </html>
-    """
-
-    try:
-        # 1. 获取 Access Token
-        token_url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={WECOM_CORPID}&corpsecret={WECOM_SECRET}"
-        token_res = requests.get(token_url, timeout=10).json()
-        if token_res.get("errcode") != 0:
-            log_message(f"获取 Access Token 失败: {token_res}")
-            return False
-        access_token = token_res.get("access_token")
-
-        # 2. 发送消息
-        send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
-        data = {
-            "touser": "@all",  # 发送给应用所有人
-            "msgtype": "mpnews",  # 使用图文消息，支持 HTML
-            "agentid": WECOM_AGENTID,
-            "mpnews": {
-                "articles": [
-                    {
-                        "title": f"🤖 AI 早报 ({datetime.now().strftime('%Y-%m-%d')})",
-                        "thumb_media_id": "",  # 可选：如果你有图片素材ID可以填这里
-                        "author": "AI News Bot",
-                        "content_source_url": "",
-                        "content": full_html,
-                        "digest": f"今日 {len(articles) if articles else 0} 条重要 AI 新闻摘要..."
-                    }
-                ]
-            },
-            "safe": 0
-        }
-        
-        response = requests.post(send_url, json=data, timeout=30)
-        result = response.json()
-        
-        if result.get("errcode") == 0:
-            log_message("微信消息发送成功！")
-            return True
-        else:
-            log_message(f"微信消息发送失败: {result}")
-            return False
+    for i, part in enumerate(content_parts):
+        try:
+            # Server 酱 API 地址
+            url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
             
-    except Exception as e:
-        log_message(f"微信消息发送失败: {e}")
-        return False
+            # 构造标题 (如果是多条，加上序号)
+            title = f"🤖 AI 早报 ({datetime.now().strftime('%Y-%m-%d')})"
+            if total_parts > 1:
+                title += f" [{i+1}/{total_parts}]"
+            
+            # 构造内容
+            desp = part
+            # 只在最后一条加上统计信息
+            if i == total_parts - 1:
+                desp += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            
+            # 发送请求
+            data = {
+                "title": title,
+                "desp": desp
+            }
+            
+            response = requests.post(url, data=data, timeout=30)
+            result = response.json()
+            
+            if result.get("code") == 0:
+                log_message(f"第 {i+1}/{total_parts} 条消息发送成功！")
+                success_count += 1
+            else:
+                log_message(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
+                
+            # 避免发送太快被限制
+            if total_parts > 1:
+                time.sleep(2)
+                
+        except Exception as e:
+            log_message(f"发送失败: {e}")
+    
+    return success_count > 0
 
 def job():
     """定时任务执行的主逻辑"""
@@ -369,8 +320,8 @@ def main():
         log_message("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
         return
 
-    if not WECOM_CORPID or not WECOM_SECRET or not WECOM_AGENTID:
-        log_message("警告: 未检测到有效的企业微信配置，微信推送可能失败。")
+    if not SERVERCHAN_SENDKEY or "SCT" not in SERVERCHAN_SENDKEY:
+        log_message("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
 
     # 执行一次任务
     try:
