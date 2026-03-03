@@ -5,6 +5,7 @@ import requests
 import hashlib
 import logging
 import concurrent.futures
+import re
 from datetime import datetime, timedelta
 from openai import OpenAI
 
@@ -14,8 +15,8 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # 2. 关键词过滤 (只保留包含这些词的新闻)
+# 使用正则预编译优化匹配速度
 KEYWORDS = [
-    # 核心关注模型 (使用模糊匹配，不带版本号，确保未来更新也能抓到)
     "DeepSeek", "GPT", "ChatGPT", "OpenAI", "Sora", "o1", "o3",
     "Claude", "Anthropic",
     "Gemini", "Google DeepMind", "DeepMind",
@@ -26,10 +27,10 @@ KEYWORDS = [
     "Mistral",
     "Grok", "xAI",
     "Doubao", "豆包", "Seed", "Seed-TTS", "Seed-Music", "Seed-Video", "ByteDance", "字节跳动",
-    
-    # 宽泛关键词 (必须与模型更新相关)
     "大模型更新", "模型发布", "新模型", "Model Release", "New Model", "State of the Art", "SOTA"
 ]
+# 编译正则：忽略大小写
+KEYWORD_PATTERN = re.compile("|".join(map(re.escape, KEYWORDS)), re.IGNORECASE)
 
 # 3. 新闻源 (精选国内外 AI 优质源)
 RSS_FEEDS = [
@@ -93,6 +94,12 @@ def fetch_single_feed(feed_url, cutoff_time):
             
             # 解析内容
             feed = feedparser.parse(response.content)
+            
+            # 检查解析是否成功
+            if hasattr(feed, 'bozo') and feed.bozo:
+                 # 某些源可能有格式错误但仍能解析部分内容，记录警告但不完全失败
+                 logger.warning(f"解析 {feed_url} 可能存在格式问题: {feed.bozo_exception}")
+
             feed_title = feed.feed.get("title", feed_url)
             logger.info(f"正在抓取: {feed_title}")
             
@@ -103,29 +110,36 @@ def fetch_single_feed(feed_url, cutoff_time):
                 summary = entry.get("summary", "") + entry.get("description", "")
                 
                 # 检查发布时间（只看最近24小时的）
+                # 严厉策略：没有时间的一律丢弃，防止重复抓取旧闻
                 pub_time = parse_published_time(entry)
-                if pub_time and pub_time < cutoff_time:
+                if not pub_time:
+                    # logger.debug(f"丢弃无时间文章: {title}")
                     continue
                 
-                # 关键词匹配
+                if pub_time < cutoff_time:
+                    continue
+                
+                # 关键词匹配 (使用正则)
                 content_to_check = f"{title} {summary}"
-                if any(k.lower() in content_to_check.lower() for k in KEYWORDS):
+                if KEYWORD_PATTERN.search(content_to_check):
                     articles.append({
                         "id": get_article_id(link),
                         "title": title,
                         "link": link,
                         "summary": summary[:200] + "..." if len(summary) > 200 else summary,
-                        "published": pub_time.strftime("%Y-%m-%d %H:%M") if pub_time else "未知"
+                        "published": pub_time.strftime("%Y-%m-%d %H:%M")
                     })
             return articles
             
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"网络请求失败 {feed_url} (第 {attempt+1} 次): {e}")
             if attempt < max_retries - 1:
-                logger.warning(f"抓取 {feed_url} 失败 (第 {attempt+1} 次重试): {e}")
                 time.sleep(2)
-            else:
-                logger.error(f"抓取 {feed_url} 最终失败: {e}")
-                return []
+        except Exception as e:
+            logger.error(f"抓取 {feed_url} 未知错误: {e}")
+            return [] # 非网络错误通常重试也无效，直接返回
+            
+    logger.error(f"抓取 {feed_url} 最终失败")
     return []
 
 def fetch_news():
@@ -137,7 +151,10 @@ def fetch_news():
     now = datetime.now()
     cutoff_time = now - timedelta(hours=24)  # 24小时内的新闻
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(RSS_FEEDS)) as executor:
+    # 限制最大线程数，避免资源耗尽
+    max_workers = min(10, len(RSS_FEEDS))
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有任务
         future_to_url = {executor.submit(fetch_single_feed, url, cutoff_time): url for url in RSS_FEEDS}
         
@@ -157,7 +174,7 @@ def fetch_news():
     return all_articles
 
 def summarize_with_deepseek(articles):
-    """使用 DeepSeek 总结新闻"""
+    """使用 DeepSeek 总结新闻 (带重试机制)"""
     if not articles:
         return None
 
@@ -202,21 +219,27 @@ def summarize_with_deepseek(articles):
 {news_text}
 """
 
-    try:
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
-            ],
-            stream=False,
-            timeout=60
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"DeepSeek 调用失败: {e}")
-        return None
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                stream=False,
+                timeout=90 # 增加超时时间，防止生成长文时中断
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"DeepSeek 调用失败 (第 {attempt+1} 次): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(3)
+            else:
+                logger.error("DeepSeek 调用最终失败")
+                return None
 
 def split_content(content, limit=3500):
     """
@@ -297,11 +320,13 @@ def send_wechat(content, articles=None):
                         break
                     else:
                         logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
-                except Exception as e:
+                except requests.exceptions.RequestException as e:
+                    logger.warning(f"微信发送网络错误 (第 {attempt+1} 次): {e}")
                     if attempt < 2:
                         time.sleep(2)
-                    else:
-                        logger.error(f"发送失败: {e}")
+                except Exception as e:
+                     logger.error(f"微信发送未知错误: {e}")
+                     break
                 
             # 避免发送太快被限制
             if total_parts > 1:
