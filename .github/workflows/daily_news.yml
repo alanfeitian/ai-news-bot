@@ -27,7 +27,5 @@ jobs:
     - name: Run script
       env:
         DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        WECOM_CORPID: ${{ secrets.WECOM_CORPID }}
-        WECOM_AGENTID: ${{ secrets.WECOM_AGENTID }}
-        WECOM_SECRET: ${{ secrets.WECOM_SECRET }}
+        SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
       run: python main.py
