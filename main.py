@@ -42,10 +42,11 @@ HISTORY_FILE = "sent_history.json"
 # 5. 日志文件
 LOG_FILE = "news_bot.log"
 
-# 6. WxPusher 配置 (微信推送)
+# 6. 企业微信配置 (无需中间商，直接推送)
 # 优先从环境变量获取
-WXPUSHER_APP_TOKEN = os.environ.get("WXPUSHER_APP_TOKEN", "AT_vmsdS2IjRoSdpl8IOdRG58DgHI5SmVwS")
-WXPUSHER_UID = os.environ.get("WXPUSHER_UID", "UID_Sdw9ZKcVuNDsxwLcwiGfAQTgDTaA")
+WECOM_CORPID = os.environ.get("WECOM_CORPID", "wwb2884e1d187304f9")
+WECOM_AGENTID = os.environ.get("WECOM_AGENTID", "1000002")
+WECOM_SECRET = os.environ.get("WECOM_SECRET", "9-sMNYdJ6XKwoEQyZ9PRyaC3ifB1DRXv50qEGLHTpLs")
 
 # ===========================================
 
@@ -246,24 +247,24 @@ def markdown_to_html(text):
     return text
 
 def send_wechat(content, articles=None):
-    """使用 WxPusher 发送微信消息 (HTML 格式)"""
+    """使用企业微信直接推送 (HTML 格式)"""
     if not content:
         return False
     
-    if not WXPUSHER_APP_TOKEN or not WXPUSHER_UID:
-        log_message("WxPusher 配置缺失，跳过推送")
+    if not WECOM_CORPID or not WECOM_SECRET or not WECOM_AGENTID:
+        log_message("企业微信配置缺失，跳过推送")
         return False
     
-    log_message("正在通过 WxPusher 发送微信消息...")
+    log_message("正在通过企业微信发送消息...")
     
-    # 转换 Markdown 为 HTML，增加一些美化样式
+    # 转换 Markdown 为 HTML
     html_content = markdown_to_html(content)
     
     # 简单的 CSS 美化
     style = """
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; }
-        h1 { font-size: 22px; color: #2c3e50; border-bottom: 2px solid #eaecef; padding-bottom: 10px; margin-top: 20px; }
+        h1 { font-size: 20px; color: #2c3e50; border-bottom: 2px solid #eaecef; padding-bottom: 10px; margin-top: 20px; }
         h2 { font-size: 18px; color: #47525d; margin-top: 20px; }
         h3 { font-size: 16px; font-weight: bold; color: #0366d6; margin-top: 15px; }
         p { margin-bottom: 10px; }
@@ -288,22 +289,43 @@ def send_wechat(content, articles=None):
     """
 
     try:
-        url = "https://wxpusher.zjiecode.com/api/send/message"
+        # 1. 获取 Access Token
+        token_url = f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={WECOM_CORPID}&corpsecret={WECOM_SECRET}"
+        token_res = requests.get(token_url, timeout=10).json()
+        if token_res.get("errcode") != 0:
+            log_message(f"获取 Access Token 失败: {token_res}")
+            return False
+        access_token = token_res.get("access_token")
+
+        # 2. 发送消息
+        send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={access_token}"
         data = {
-            "appToken": WXPUSHER_APP_TOKEN,
-            "content": full_html,
-            "contentType": 2,  # 2 表示 HTML
-            "uids": [WXPUSHER_UID]
+            "touser": "@all",  # 发送给应用所有人
+            "msgtype": "mpnews",  # 使用图文消息，支持 HTML
+            "agentid": WECOM_AGENTID,
+            "mpnews": {
+                "articles": [
+                    {
+                        "title": f"🤖 AI 早报 ({datetime.now().strftime('%Y-%m-%d')})",
+                        "thumb_media_id": "",  # 可选：如果你有图片素材ID可以填这里
+                        "author": "AI News Bot",
+                        "content_source_url": "",
+                        "content": full_html,
+                        "digest": f"今日 {len(articles) if articles else 0} 条重要 AI 新闻摘要..."
+                    }
+                ]
+            },
+            "safe": 0
         }
         
-        response = requests.post(url, json=data, timeout=30)
+        response = requests.post(send_url, json=data, timeout=30)
         result = response.json()
         
-        if result.get("success"):
+        if result.get("errcode") == 0:
             log_message("微信消息发送成功！")
             return True
         else:
-            log_message(f"微信消息发送失败: {result.get('msg')}")
+            log_message(f"微信消息发送失败: {result}")
             return False
             
     except Exception as e:
@@ -347,8 +369,8 @@ def main():
         log_message("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
         return
 
-    if not WXPUSHER_APP_TOKEN or not WXPUSHER_UID:
-        log_message("警告: 未检测到有效的 WxPusher 配置，微信推送可能失败。")
+    if not WECOM_CORPID or not WECOM_SECRET or not WECOM_AGENTID:
+        log_message("警告: 未检测到有效的企业微信配置，微信推送可能失败。")
 
     # 执行一次任务
     try:
