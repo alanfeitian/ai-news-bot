@@ -50,8 +50,9 @@ RSS_FEEDS = [
     "https://huggingface.co/blog/feed.xml",   # Hugging Face Blog (开源模型)
 ]
 
-# 4. Server 酱配置 (微信推送)
-SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY")
+# 4. 钉钉机器人配置 (Webhook)
+DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK")
+DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET") # 可选：如果使用加签安全设置
 
 # ===========================================
 
@@ -275,62 +276,84 @@ def split_content(content, limit=3500):
         
     return parts
 
-def send_wechat(content, articles=None):
-    """使用 Server 酱发送微信消息 (自动拆分长消息)"""
+import hmac
+import hashlib
+import base64
+import urllib.parse
+
+def send_dingtalk(content, articles=None):
+    """使用钉钉机器人发送消息 (Markdown)"""
     if not content:
         return False
     
-    if not SERVERCHAN_SENDKEY:
-        logger.warning("Server 酱 SendKey 未配置，跳过微信推送")
+    if not DINGTALK_WEBHOOK:
+        logger.warning("钉钉 Webhook 未配置，跳过推送")
         return False
     
-    logger.info("正在发送微信消息...")
+    logger.info("正在发送钉钉消息...")
     
-    # 自动拆分消息
-    content_parts = split_content(content)
+    # 钉钉消息限制较宽松，但也拆分一下以防万一 (限制约 15000 字节)
+    content_parts = split_content(content, limit=10000)
     total_parts = len(content_parts)
     
     success_count = 0
     
+    # 处理加签 (如果配置了 Secret)
+    webhook_url = DINGTALK_WEBHOOK
+    if DINGTALK_SECRET:
+        timestamp = str(round(time.time() * 1000))
+        secret_enc = DINGTALK_SECRET.encode('utf-8')
+        string_to_sign = '{}\n{}'.format(timestamp, DINGTALK_SECRET)
+        string_to_sign_enc = string_to_sign.encode('utf-8')
+        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        webhook_url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
+
     for i, part in enumerate(content_parts):
         try:
-            # Server 酱 API 地址
-            url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
-            
-            # 构造标题 (如果是多条，加上序号)
+            # 构造标题
             title = f"🤖 AI 早报 ({datetime.now().strftime('%Y-%m-%d')})"
             if total_parts > 1:
                 title += f" [{i+1}/{total_parts}]"
             
-            # 构造内容
-            desp = part
+            # 构造内容 (Markdown)
+            # 钉钉 Markdown 建议包含关键词
+            text = f"# {title}\n\n{part}"
+            
             # 只在最后一条加上统计信息
             if i == total_parts - 1:
-                desp += f"\n\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                text += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             
-            # 发送请求，增加重试
+            payload = {
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": title,
+                    "text": text
+                }
+            }
+            
+            # 发送请求
             for attempt in range(3):
                 try:
-                    response = requests.post(url, data={"title": title, "desp": desp}, timeout=30)
+                    response = requests.post(webhook_url, json=payload, timeout=10)
                     result = response.json()
                     
-                    if result.get("code") == 0:
+                    if result.get("errcode") == 0:
                         logger.info(f"第 {i+1}/{total_parts} 条消息发送成功！")
                         success_count += 1
                         break
                     else:
-                        logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
+                        logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('errmsg', '未知错误')}")
                 except requests.exceptions.RequestException as e:
-                    logger.warning(f"微信发送网络错误 (第 {attempt+1} 次): {e}")
+                    logger.warning(f"钉钉发送网络错误 (第 {attempt+1} 次): {e}")
                     if attempt < 2:
                         time.sleep(2)
                 except Exception as e:
-                     logger.error(f"微信发送未知错误: {e}")
+                     logger.error(f"钉钉发送未知错误: {e}")
                      break
                 
-            # 避免发送太快被限制
             if total_parts > 1:
-                time.sleep(2)
+                time.sleep(1)
                 
         except Exception as e:
             logger.error(f"发送流程异常: {e}")
@@ -346,8 +369,8 @@ def job():
     if articles:
         summary = summarize_with_deepseek(articles)
         if summary:
-            # 只发送微信
-            send_wechat(summary, articles)
+            # 发送钉钉
+            send_dingtalk(summary, articles)
         else:
             logger.warning("摘要生成失败或为空，跳过发送。")
     else:
@@ -366,7 +389,11 @@ def main():
         return
 
     if not SERVERCHAN_SENDKEY:
-        logger.warning("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
+        # logger.warning("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
+        pass # Server酱已移除
+    
+    if not DINGTALK_WEBHOOK:
+        logger.warning("警告: 未检测到有效的 DINGTALK_WEBHOOK，钉钉推送可能失败。")
 
     # 执行一次任务
     try:
