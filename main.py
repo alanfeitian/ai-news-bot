@@ -97,8 +97,13 @@ def fetch_single_feed(feed_url, cutoff_time):
             }
             
             # 使用 requests 获取内容，设置超时
-            response = requests.get(feed_url, headers=headers, timeout=15)
-            response.raise_for_status()
+            # 部分 RSS 源可能不支持 HEAD 请求或有特殊校验，直接用 GET
+            response = requests.get(feed_url, headers=headers, timeout=20)
+            
+            # 针对 403/404 等错误，不要直接 raise，而是记录并跳过，避免整个程序崩溃
+            if response.status_code != 200:
+                logger.warning(f"源 {feed_url} 返回状态码 {response.status_code}，跳过")
+                return []
             
             # 解析内容
             feed = feedparser.parse(response.content)
@@ -112,6 +117,10 @@ def fetch_single_feed(feed_url, cutoff_time):
             logger.info(f"正在抓取: {feed_title}")
             
             articles = []
+            if not feed.entries:
+                 logger.info(f"源 {feed_title} 无内容或解析为空")
+                 return []
+
             for entry in feed.entries:
                 title = entry.title
                 link = entry.link
