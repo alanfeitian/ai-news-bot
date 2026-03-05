@@ -333,20 +333,18 @@ def send_dingtalk(content, articles=None):
                 title += f" [{i+1}/{total_parts}]"
             
             # 构造内容 (Markdown)
+            # 钉钉 Markdown 建议包含关键词
             text = f"# {title}\n\n{part}"
             
             # 只在最后一条加上统计信息
             if i == total_parts - 1:
                 text += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             
-            # 使用 actionCard 类型，排版更紧凑，没有两侧空白
             payload = {
-                "msgtype": "actionCard",
-                "actionCard": {
+                "msgtype": "markdown",
+                "markdown": {
                     "title": title,
-                    "text": text,
-                    "singleTitle": "📰 查看更多 AI 资讯",
-                    "singleURL": "https://github.com/alanfeitian/ai-news-bot"
+                    "text": text
                 }
             }
             
