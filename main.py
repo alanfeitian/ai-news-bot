@@ -50,16 +50,15 @@ RSS_FEEDS = [
     "https://huggingface.co/blog/feed.xml",   # Hugging Face Blog (开源模型)
 ]
 
-# 4. 钉钉机器人配置 (Webhook)
-DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK")
-DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET") # 可选：如果使用加签安全设置
+# 4. Server酱配置 (SendKey)
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY")
 
 # 检查必要配置
 if not DEEPSEEK_API_KEY:
     raise ValueError("❌ 错误: 环境变量 DEEPSEEK_API_KEY 未设置！请检查 GitHub Secrets。")
 
-if not DINGTALK_WEBHOOK:
-    raise ValueError("❌ 错误: 环境变量 DINGTALK_WEBHOOK 未设置！请检查 GitHub Secrets。")
+if not SERVERCHAN_SENDKEY:
+    raise ValueError("❌ 错误: 环境变量 SERVERCHAN_SENDKEY 未设置！请检查 GitHub Secrets。")
 
 # ===========================================
 
@@ -292,38 +291,23 @@ def split_content(content, limit=3500):
         
     return parts
 
-import hmac
-import hashlib
-import base64
-import urllib.parse
-
-def send_dingtalk(content, articles=None):
-    """使用钉钉机器人发送消息 (Markdown)"""
+def send_serverchan(content, articles=None):
+    """使用Server酱发送消息 (Markdown)"""
     if not content:
         return False
     
-    if not DINGTALK_WEBHOOK:
-        logger.warning("钉钉 Webhook 未配置，跳过推送")
+    if not SERVERCHAN_SENDKEY:
+        logger.warning("Server酱 SendKey 未配置，跳过推送")
         return False
     
-    logger.info("正在发送钉钉消息...")
+    logger.info("正在发送Server酱消息...")
     
-    # 钉钉消息限制较宽松，但也拆分一下以防万一 (限制约 15000 字节)
-    content_parts = split_content(content, limit=10000)
+    # Server酱有限制，拆分内容
+    content_parts = split_content(content, limit=3500)
     total_parts = len(content_parts)
     
     success_count = 0
-    
-    # 处理加签 (如果配置了 Secret)
-    webhook_url = DINGTALK_WEBHOOK
-    if DINGTALK_SECRET:
-        timestamp = str(round(time.time() * 1000))
-        secret_enc = DINGTALK_SECRET.encode('utf-8')
-        string_to_sign = '{}\n{}'.format(timestamp, DINGTALK_SECRET)
-        string_to_sign_enc = string_to_sign.encode('utf-8')
-        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
-        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-        webhook_url = f"{DINGTALK_WEBHOOK}&timestamp={timestamp}&sign={sign}"
+    url = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
 
     for i, part in enumerate(content_parts):
         try:
@@ -333,43 +317,39 @@ def send_dingtalk(content, articles=None):
                 title += f" [{i+1}/{total_parts}]"
             
             # 构造内容 (Markdown)
-            # 钉钉 Markdown 建议包含关键词
-            text = f"# {title}\n\n{part}"
+            text = part
             
             # 只在最后一条加上统计信息
             if i == total_parts - 1:
                 text += f"\n\n---\n📊 共 {len(articles) if articles else 0} 条新闻\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             
             payload = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "title": title,
-                    "text": text
-                }
+                "title": title,
+                "desp": text
             }
             
             # 发送请求
             for attempt in range(3):
                 try:
-                    response = requests.post(webhook_url, json=payload, timeout=10)
+                    response = requests.post(url, data=payload, timeout=10)
                     result = response.json()
                     
-                    if result.get("errcode") == 0:
+                    if result.get("code") == 0:
                         logger.info(f"第 {i+1}/{total_parts} 条消息发送成功！")
                         success_count += 1
                         break
                     else:
-                        logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('errmsg', '未知错误')}")
+                        logger.warning(f"第 {i+1}/{total_parts} 条消息发送失败: {result.get('message', '未知错误')}")
                 except requests.exceptions.RequestException as e:
-                    logger.warning(f"钉钉发送网络错误 (第 {attempt+1} 次): {e}")
+                    logger.warning(f"Server酱发送网络错误 (第 {attempt+1} 次): {e}")
                     if attempt < 2:
                         time.sleep(2)
                 except Exception as e:
-                     logger.error(f"钉钉发送未知错误: {e}")
+                     logger.error(f"Server酱发送未知错误: {e}")
                      break
                 
             if total_parts > 1:
-                time.sleep(1)
+                time.sleep(1) # 避免请求过于频繁
                 
         except Exception as e:
             logger.error(f"发送流程异常: {e}")
@@ -385,8 +365,8 @@ def job():
     if articles:
         summary = summarize_with_deepseek(articles)
         if summary:
-            # 发送钉钉
-            send_dingtalk(summary, articles)
+            # 发送Server酱
+            send_serverchan(summary, articles)
         else:
             logger.warning("摘要生成失败或为空，跳过发送。")
     else:
@@ -400,11 +380,11 @@ def main():
     logger.info("=== AI 新闻助手启动 (GitHub Actions 模式) ===")
     
     # 打印部分配置信息用于调试 (注意脱敏)
-    if DINGTALK_WEBHOOK:
-        masked_webhook = DINGTALK_WEBHOOK[:30] + "******"
-        logger.info(f"钉钉 Webhook 已配置: {masked_webhook}")
+    if SERVERCHAN_SENDKEY:
+        masked_sendkey = SERVERCHAN_SENDKEY[:5] + "******" + SERVERCHAN_SENDKEY[-4:] if len(SERVERCHAN_SENDKEY) > 10 else "******"
+        logger.info(f"Server酱 SendKey 已配置: {masked_sendkey}")
     else:
-        logger.error("钉钉 Webhook 未找到！")
+        logger.error("Server酱 SendKey 未找到！")
 
     # 执行一次任务
     try:
