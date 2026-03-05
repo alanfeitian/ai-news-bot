@@ -24,8 +24,27 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
+    - name: Debug Environment
+      env:
+        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+      run: |
+        echo "Checking environment variables..."
+        if [ -z "$DEEPSEEK_API_KEY" ]; then
+          echo "Error: DEEPSEEK_API_KEY is empty"
+        else
+          echo "DEEPSEEK_API_KEY is set (length: ${#DEEPSEEK_API_KEY})"
+        fi
+        
+        if [ -z "$DINGTALK_WEBHOOK" ]; then
+          echo "Error: DINGTALK_WEBHOOK is empty"
+        else
+          echo "DINGTALK_WEBHOOK is set (length: ${#DINGTALK_WEBHOOK})"
+        fi
+        
     - name: Run script
       env:
         DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+        DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
       run: python main.py
