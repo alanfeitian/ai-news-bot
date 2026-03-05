@@ -54,6 +54,13 @@ RSS_FEEDS = [
 DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK")
 DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET") # 可选：如果使用加签安全设置
 
+# 检查必要配置
+if not DEEPSEEK_API_KEY:
+    raise ValueError("❌ 错误: 环境变量 DEEPSEEK_API_KEY 未设置！请检查 GitHub Secrets。")
+
+if not DINGTALK_WEBHOOK:
+    raise ValueError("❌ 错误: 环境变量 DINGTALK_WEBHOOK 未设置！请检查 GitHub Secrets。")
+
 # ===========================================
 
 # 配置日志
@@ -383,23 +390,20 @@ def main():
     """主程序入口"""
     logger.info("=== AI 新闻助手启动 (GitHub Actions 模式) ===")
     
-    # 检查环境变量配置
-    if not DEEPSEEK_API_KEY:
-        logger.error("错误: 未检测到有效的 DEEPSEEK_API_KEY，请检查 GitHub Secrets 配置。")
-        return
-
-    if not SERVERCHAN_SENDKEY:
-        # logger.warning("警告: 未检测到有效的 Server酱 配置，微信推送可能失败。")
-        pass # Server酱已移除
-    
-    if not DINGTALK_WEBHOOK:
-        logger.warning("警告: 未检测到有效的 DINGTALK_WEBHOOK，钉钉推送可能失败。")
+    # 打印部分配置信息用于调试 (注意脱敏)
+    if DINGTALK_WEBHOOK:
+        masked_webhook = DINGTALK_WEBHOOK[:30] + "******"
+        logger.info(f"钉钉 Webhook 已配置: {masked_webhook}")
+    else:
+        logger.error("钉钉 Webhook 未找到！")
 
     # 执行一次任务
     try:
         job()
     except Exception as e:
         logger.error(f"任务执行出错: {e}")
+        # 在 Actions 中抛出异常，标记为失败
+        raise e
     
     logger.info("=== 任务结束 ===")
 
