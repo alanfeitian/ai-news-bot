@@ -3,3 +3,4 @@ __pycache__/
 *.log
 sent_history.json
 .vscode/
+.qoder/

@@ -6,7 +6,10 @@ import hashlib
 import logging
 import concurrent.futures
 import re
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List, Dict, Set
 from openai import OpenAI
 
 # ================= 配置区域 =================
@@ -53,6 +56,10 @@ RSS_FEEDS = [
 # 4. Server酱配置 (SendKey)
 SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY")
 
+# 5. 历史记录文件路径
+SENT_HISTORY_FILE = Path(__file__).parent / "sent_history.json"
+MAX_HISTORY_SIZE = 1000  # 最多保留1000条历史记录，防止文件过大
+
 # 检查必要配置
 if not DEEPSEEK_API_KEY:
     raise ValueError("❌ 错误: 环境变量 DEEPSEEK_API_KEY 未设置！请检查 GitHub Secrets。")
@@ -70,11 +77,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def get_article_id(link):
+def load_sent_history() -> Set[str]:
+    """加载已发送文章ID的历史记录"""
+    try:
+        if SENT_HISTORY_FILE.exists():
+            with open(SENT_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return set(data) if isinstance(data, list) else set()
+    except (json.JSONDecodeError, IOError) as e:
+        logger.warning(f"加载历史记录失败: {e}，将使用空集合")
+    return set()
+
+def save_sent_history(sent_ids: Set[str]) -> None:
+    """保存已发送文章ID到文件（保留最新的 MAX_HISTORY_SIZE 条）"""
+    try:
+        # 转换为列表并限制大小（保留最新的）
+        ids_list = list(sent_ids)[-MAX_HISTORY_SIZE:]
+        with open(SENT_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(ids_list, f, ensure_ascii=False, indent=2)
+        logger.info(f"历史记录已保存，共 {len(ids_list)} 条")
+    except IOError as e:
+        logger.error(f"保存历史记录失败: {e}")
+
+def get_article_id(link: str) -> str:
     """生成文章唯一ID（基于链接的MD5哈希）"""
     return hashlib.md5(link.encode("utf-8")).hexdigest()
 
-def parse_published_time(entry):
+def parse_published_time(entry) -> Optional[datetime]:
     """解析文章发布时间，返回 datetime 对象或 None"""
     try:
         # 尝试不同的发布时间字段
@@ -85,7 +114,7 @@ def parse_published_time(entry):
         pass
     return None
 
-def fetch_single_feed(feed_url, cutoff_time):
+def fetch_single_feed(feed_url: str, cutoff_time: datetime) -> List[Dict]:
     """抓取单个 RSS 源 (带重试机制)"""
     max_retries = 3
     for attempt in range(max_retries):
@@ -158,11 +187,18 @@ def fetch_single_feed(feed_url, cutoff_time):
     logger.error(f"抓取 {feed_url} 最终失败")
     return []
 
-def fetch_news():
-    """多线程并发抓取并筛选新闻"""
+def fetch_news(sent_history: Set[str]) -> List[Dict]:
+    """多线程并发抓取并筛选新闻
+    
+    Args:
+        sent_history: 已发送文章ID集合，用于过滤重复推送
+    
+    Returns:
+        新文章列表（未发送过的）
+    """
     logger.info("开始多线程抓取新闻...")
     all_articles = []
-    seen_ids = set() # 本次运行去重
+    seen_ids = set()  # 本次运行去重
     
     now = datetime.now()
     cutoff_time = now - timedelta(hours=24)  # 24小时内的新闻
@@ -180,16 +216,19 @@ def fetch_news():
                 articles = future.result()
                 if articles:
                     for article in articles:
+                        # 本次运行去重
                         if article["id"] not in seen_ids:
-                            seen_ids.add(article["id"])
-                            all_articles.append(article)
+                            # 过滤已发送过的文章
+                            if article["id"] not in sent_history:
+                                seen_ids.add(article["id"])
+                                all_articles.append(article)
             except Exception as e:
                 logger.error(f"处理 {url} 结果时出错: {e}")
     
-    logger.info(f"抓取完成，共筛选出 {len(all_articles)} 条新相关新闻。")
+    logger.info(f"抓取完成，共筛选出 {len(all_articles)} 条新相关新闻（已过滤 {len(sent_history)} 条历史记录）。")
     return all_articles
 
-def summarize_with_deepseek(articles):
+def summarize_with_deepseek(articles: List[Dict]) -> Optional[str]:
     """使用 DeepSeek 总结新闻 (带重试机制)"""
     if not articles:
         return None
@@ -252,7 +291,7 @@ def summarize_with_deepseek(articles):
                 logger.error("DeepSeek 调用最终失败")
                 return None
 
-def split_content(content, limit=3500):
+def split_content(content: str, limit: int = 3500) -> List[str]:
     """
     智能拆分长消息，确保不截断单条新闻
     limit: Server酱限制约 4000 字符，预留 500 字符给标题和统计信息
@@ -286,7 +325,7 @@ def split_content(content, limit=3500):
         
     return parts
 
-def send_serverchan(content, articles=None):
+def send_serverchan(content: str, articles: Optional[List[Dict]] = None) -> bool:
     """使用Server酱发送消息 (Markdown)"""
     if not content:
         return False
@@ -356,12 +395,26 @@ def job():
     logger.info("=" * 50)
     logger.info("任务开始执行...")
     
-    articles = fetch_news()
+    # 加载已发送历史记录
+    sent_history = load_sent_history()
+    logger.info(f"已加载历史记录 {len(sent_history)} 条")
+    
+    # 抓取新闻（过滤已发送的）
+    articles = fetch_news(sent_history)
+    
     if articles:
         summary = summarize_with_deepseek(articles)
         if summary:
             # 发送Server酱
-            send_serverchan(summary, articles)
+            success = send_serverchan(summary, articles)
+            if success:
+                # 发送成功，更新历史记录
+                new_ids = {article["id"] for article in articles}
+                sent_history.update(new_ids)
+                save_sent_history(sent_history)
+                logger.info(f"已记录 {len(new_ids)} 条新发送的文章")
+            else:
+                logger.warning("发送失败，不更新历史记录，下次将重新尝试发送")
         else:
             logger.warning("摘要生成失败或为空，跳过发送。")
     else:
