@@ -46,7 +46,7 @@ RSS_FEEDS = [
     
     # --- 国外源 (GitHub Actions 可直接访问) ---
     "https://openai.com/blog/rss.xml",      # OpenAI 官方博客
-    "https://www.anthropic.com/feed",       # Anthropic (Claude) 官方博客
+    "https://www.anthropic.com/news/rss.xml", # Anthropic (Claude) 官方新闻
     "https://googleblog.blogspot.com/feeds/posts/default", # Google AI Blog
     "https://techcrunch.com/category/artificial-intelligence/feed/", # TechCrunch AI
     "https://www.theverge.com/rss/index.xml", # The Verge (前沿科技)
